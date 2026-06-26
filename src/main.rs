@@ -2420,6 +2420,8 @@ enum Commands {
     ///   ~/.claude/skills, ~/.cursor/skills, ~/.codex/skills,
     ///   ~/.config/opencode/skills, ~/.pi/agent/extensions). Pass --project to
     ///   install into the current project instead (e.g. <repo>/.claude/skills).
+    ///   For Claude Code, CLAUDE_CONFIG_DIR relocates the user-global tree, so
+    ///   user-scope installs honour it (e.g. $CLAUDE_CONFIG_DIR/skills).
     ///
     /// COMMANDS:
     ///   list      List available skills, agents, and extensions

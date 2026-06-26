@@ -580,7 +580,7 @@ pup skills list --type=agent
 pup skills install claude --name dd-monitors
 ```
 
-For Claude Code, skills install to `~/.claude/skills/` (or `.claude/skills/` with `--project`) and agents install to `~/.claude/agents/` (native subagent format). For Cursor, Codex, and opencode, everything installs as `SKILL.md` under that tool's skills directory (e.g. `~/.cursor/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`).
+For Claude Code, skills install to `~/.claude/skills/` (or `.claude/skills/` with `--project`) and agents install to `~/.claude/agents/` (native subagent format). If [`CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/env-vars#variables) is set, user-scope installs follow it instead (e.g. `$CLAUDE_CONFIG_DIR/skills/` and `$CLAUDE_CONFIG_DIR/agents/`); `--project` installs are unaffected. For Cursor, Codex, and opencode, everything installs as `SKILL.md` under that tool's skills directory (e.g. `~/.cursor/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`).
 
 Pup ships plugin manifest files for several AI coding assistants:
 

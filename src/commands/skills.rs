@@ -527,4 +527,46 @@ mod tests {
         .to_string();
         assert!(err.contains("skill not found"), "got: {err}");
     }
+
+    #[test]
+    fn install_claude_user_scope_honours_config_dir_env() {
+        // User-scope claude installs (no --dir) must follow CLAUDE_CONFIG_DIR
+        // instead of the default ~/.claude. Serialize on ENV_LOCK since this
+        // mutates a process-wide env var.
+        let _guard = crate::test_utils::ENV_LOCK.blocking_lock();
+        let tmp = TempDir::new("install_claude_config_dir");
+        let cfg = base_cfg();
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+
+        // A skill lands under $CLAUDE_CONFIG_DIR/skills ...
+        let skill = install(
+            &cfg,
+            Some("claude".to_string()),
+            Some("dd-pup".to_string()),
+            None,
+            None,
+            false,
+        );
+        // ... and an agent under $CLAUDE_CONFIG_DIR/agents.
+        let agent = install(
+            &cfg,
+            Some("claude".to_string()),
+            Some("metrics".to_string()),
+            None,
+            None,
+            false,
+        );
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        skill.unwrap();
+        agent.unwrap();
+
+        assert!(
+            tmp.path().join("skills/dd-pup/SKILL.md").exists(),
+            "skill should install under $CLAUDE_CONFIG_DIR/skills"
+        );
+        assert!(
+            tmp.path().join("agents/metrics.md").exists(),
+            "agent should install under $CLAUDE_CONFIG_DIR/agents"
+        );
+    }
 }

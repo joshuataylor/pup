@@ -561,6 +561,18 @@ impl PlatformSpec {
             && self.user_agents.is_empty()
             && self.project_agents.is_empty()
     }
+
+    /// Environment variable that relocates this platform's user-global config
+    /// directory, if the platform supports one. Claude Code honours
+    /// `CLAUDE_CONFIG_DIR`, which moves the entire `~/.claude` tree (skills,
+    /// agents, settings, ...) elsewhere. Only the user scope is affected;
+    /// project-local `.claude/` paths are unchanged.
+    pub fn config_dir_env(&self) -> Option<&'static str> {
+        match self.name {
+            "claude-code" => Some("CLAUDE_CONFIG_DIR"),
+            _ => None,
+        }
+    }
 }
 
 /// Registry of supported platforms.
@@ -726,21 +738,47 @@ pub fn resolve_platform_list(input: Option<&str>) -> Vec<String> {
     vec![resolve_platform_name(input)]
 }
 
+/// Read the user-global config-dir override for a platform from the
+/// environment (e.g. `CLAUDE_CONFIG_DIR` for Claude Code). Returns `None` when
+/// the platform has no such override or the variable is unset/blank.
+fn config_dir_override(platform: &str) -> Option<PathBuf> {
+    let env = lookup_platform(platform)?.config_dir_env()?;
+    let value = std::env::var(env).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
+}
+
 /// Determine the extensions install directory for a platform.
 pub fn extensions_dir(platform: &str, project_root: &Path, user_scope: bool) -> Option<PathBuf> {
-    extensions_dir_with_home(
+    extensions_dir_resolved(
         platform,
         dirs::home_dir().as_deref(),
+        config_dir_override(platform).as_deref(),
         project_root,
         user_scope,
     )
 }
 
 /// Same as [`extensions_dir`] but takes an explicit `home` directory, so tests
-/// don't have to mutate the process-global `HOME` env var.
+/// don't have to mutate the process-global `HOME` env var. Does not consult any
+/// config-dir override; use [`extensions_dir`] for environment-driven behaviour.
+#[cfg(test)]
 pub fn extensions_dir_with_home(
     platform: &str,
     home: Option<&Path>,
+    project_root: &Path,
+    user_scope: bool,
+) -> Option<PathBuf> {
+    extensions_dir_resolved(platform, home, None, project_root, user_scope)
+}
+
+fn extensions_dir_resolved(
+    platform: &str,
+    home: Option<&Path>,
+    config_override: Option<&Path>,
     project_root: &Path,
     user_scope: bool,
 ) -> Option<PathBuf> {
@@ -750,23 +788,36 @@ pub fn extensions_dir_with_home(
     } else {
         spec.project_extensions
     };
-    resolve_relative(sub, home, project_root, user_scope)
+    resolve_relative(sub, home, config_override, project_root, user_scope)
 }
 
 /// Determine the skills install directory for a platform.
 pub fn skills_dir(platform: &str, project_root: &Path, user_scope: bool) -> Option<PathBuf> {
-    skills_dir_with_home(
+    skills_dir_resolved(
         platform,
         dirs::home_dir().as_deref(),
+        config_dir_override(platform).as_deref(),
         project_root,
         user_scope,
     )
 }
 
-/// Same as [`skills_dir`] but takes an explicit `home` directory.
+/// Same as [`skills_dir`] but takes an explicit `home` directory and ignores any
+/// config-dir override; use [`skills_dir`] for environment-driven behaviour.
+#[cfg(test)]
 pub fn skills_dir_with_home(
     platform: &str,
     home: Option<&Path>,
+    project_root: &Path,
+    user_scope: bool,
+) -> Option<PathBuf> {
+    skills_dir_resolved(platform, home, None, project_root, user_scope)
+}
+
+fn skills_dir_resolved(
+    platform: &str,
+    home: Option<&Path>,
+    config_override: Option<&Path>,
     project_root: &Path,
     user_scope: bool,
 ) -> Option<PathBuf> {
@@ -776,25 +827,38 @@ pub fn skills_dir_with_home(
     } else {
         spec.project_skills
     };
-    resolve_relative(sub, home, project_root, user_scope)
+    resolve_relative(sub, home, config_override, project_root, user_scope)
 }
 
 /// Determine the agents (subagents) install directory for a platform.
 ///
 /// If the platform has no dedicated agents dir, agents share the skills dir.
 pub fn agents_dir(platform: &str, project_root: &Path, user_scope: bool) -> Option<PathBuf> {
-    agents_dir_with_home(
+    agents_dir_resolved(
         platform,
         dirs::home_dir().as_deref(),
+        config_dir_override(platform).as_deref(),
         project_root,
         user_scope,
     )
 }
 
-/// Same as [`agents_dir`] but takes an explicit `home` directory.
+/// Same as [`agents_dir`] but takes an explicit `home` directory and ignores any
+/// config-dir override; use [`agents_dir`] for environment-driven behaviour.
+#[cfg(test)]
 pub fn agents_dir_with_home(
     platform: &str,
     home: Option<&Path>,
+    project_root: &Path,
+    user_scope: bool,
+) -> Option<PathBuf> {
+    agents_dir_resolved(platform, home, None, project_root, user_scope)
+}
+
+fn agents_dir_resolved(
+    platform: &str,
+    home: Option<&Path>,
+    config_override: Option<&Path>,
     project_root: &Path,
     user_scope: bool,
 ) -> Option<PathBuf> {
@@ -806,23 +870,39 @@ pub fn agents_dir_with_home(
     };
     if sub.is_empty() {
         // Empty sentinel means "share the skills dir for this scope."
-        return skills_dir_with_home(platform, home, project_root, user_scope);
+        return skills_dir_resolved(platform, home, config_override, project_root, user_scope);
     }
-    resolve_relative(sub, home, project_root, user_scope)
+    resolve_relative(sub, home, config_override, project_root, user_scope)
 }
 
 /// Resolve a forward-slash-separated relative subpath against either the home
 /// directory (user scope) or the project root (project scope). Returns `None`
 /// when the subpath is empty (the sentinel for "not applicable") or when user
 /// scope is requested but `home` is unavailable.
+///
+/// When `config_override` is set and user scope is requested, the subpath is
+/// rebased onto the override instead of `home`: its leading component (the
+/// config-directory name the override replaces, e.g. `.claude`) is dropped and
+/// the remainder appended. This implements `CLAUDE_CONFIG_DIR` and friends,
+/// which relocate the whole user-global tree. The project scope ignores it.
 fn resolve_relative(
     sub: &str,
     home: Option<&Path>,
+    config_override: Option<&Path>,
     project_root: &Path,
     user_scope: bool,
 ) -> Option<PathBuf> {
     if sub.is_empty() {
         return None;
+    }
+    if user_scope {
+        if let Some(config_dir) = config_override {
+            let mut base = config_dir.to_path_buf();
+            for part in sub.split('/').skip(1) {
+                base.push(part);
+            }
+            return Some(base);
+        }
     }
     let mut base = if user_scope {
         home?.to_path_buf()
@@ -1210,6 +1290,117 @@ mod tests {
             agents_dir_with_home("cursor", None, &root, false),
             Some(root.join(".cursor/skills"))
         );
+    }
+
+    #[test]
+    fn test_config_dir_env_mapping() {
+        assert_eq!(
+            lookup_platform("claude-code").unwrap().config_dir_env(),
+            Some("CLAUDE_CONFIG_DIR")
+        );
+        // Aliases resolve to the same canonical spec.
+        assert_eq!(
+            lookup_platform("claude").unwrap().config_dir_env(),
+            Some("CLAUDE_CONFIG_DIR")
+        );
+        // No other platform relocates its user-global dir via an env var.
+        for plat in [
+            "cursor",
+            "codex",
+            "opencode",
+            "windsurf",
+            "gemini-code",
+            "pi",
+        ] {
+            assert_eq!(
+                lookup_platform(plat).unwrap().config_dir_env(),
+                None,
+                "{plat} should not have a config-dir env override"
+            );
+        }
+    }
+
+    #[test]
+    fn test_skills_dir_claude_user_config_override() {
+        // CLAUDE_CONFIG_DIR relocates the whole tree: the leading `.claude`
+        // component is dropped and the remainder rebased onto the override.
+        let home = PathBuf::from("/tmp/fake-home");
+        let cfg = PathBuf::from("/tmp/custom-claude");
+        assert_eq!(
+            skills_dir_resolved(
+                "claude-code",
+                Some(&home),
+                Some(&cfg),
+                &PathBuf::from("/unused"),
+                true,
+            ),
+            Some(cfg.join("skills"))
+        );
+    }
+
+    #[test]
+    fn test_agents_dir_claude_user_config_override() {
+        let home = PathBuf::from("/tmp/fake-home");
+        let cfg = PathBuf::from("/tmp/custom-claude");
+        assert_eq!(
+            agents_dir_resolved(
+                "claude-code",
+                Some(&home),
+                Some(&cfg),
+                &PathBuf::from("/unused"),
+                true,
+            ),
+            Some(cfg.join("agents"))
+        );
+    }
+
+    #[test]
+    fn test_skills_dir_claude_user_config_override_without_home() {
+        // The override stands in for `home`, so resolution still works when the
+        // home directory is unavailable.
+        let cfg = PathBuf::from("/tmp/custom-claude");
+        assert_eq!(
+            skills_dir_resolved(
+                "claude-code",
+                None,
+                Some(&cfg),
+                &PathBuf::from("/unused"),
+                true
+            ),
+            Some(cfg.join("skills"))
+        );
+    }
+
+    #[test]
+    fn test_skills_dir_claude_project_ignores_config_override() {
+        // CLAUDE_CONFIG_DIR only relocates the user-global tree; project-local
+        // `.claude/skills` stays under the project root.
+        let root = PathBuf::from("/tmp/test-project");
+        let cfg = PathBuf::from("/tmp/custom-claude");
+        assert_eq!(
+            skills_dir_resolved("claude-code", None, Some(&cfg), &root, false),
+            Some(root.join(".claude/skills"))
+        );
+    }
+
+    #[test]
+    fn test_config_dir_override_reads_env() {
+        // Serialize with other tests that mutate process-wide env vars.
+        let _guard = crate::test_utils::ENV_LOCK.blocking_lock();
+        std::env::set_var("CLAUDE_CONFIG_DIR", "/tmp/env-claude");
+        assert_eq!(
+            config_dir_override("claude-code"),
+            Some(PathBuf::from("/tmp/env-claude"))
+        );
+        // A platform without an override env var ignores the variable.
+        assert_eq!(config_dir_override("cursor"), None);
+
+        // Blank values are treated as unset.
+        std::env::set_var("CLAUDE_CONFIG_DIR", "   ");
+        assert_eq!(config_dir_override("claude-code"), None);
+
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        assert_eq!(config_dir_override("claude-code"), None);
     }
 
     fn entry(name: &'static str, entry_type: &'static str, content: &'static str) -> SkillEntry {
